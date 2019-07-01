@@ -1,0 +1,536 @@
+---
+title: "STA 531 Final Paper"
+author: "Eduardo Coronado"
+date: "April 26th, 2019"
+output: 
+  pdf_document
+fontsize: 11pt
+abstract:  Early detection of the influenza outbreaks is one of the biggest challenges of outbreak surveillance systems. In this paper, a finite, homogeneous two-state Hidden Markov Model (HMM) was developed to determine the epidemic and non-epidemic dynamics influenza-like illnesses (ILI) in a differenced time series. These dynamics were further modeled via a first-order auto-regressive process based on the state, and parameters estimated via the Baum-Welch algorithm. The model was evaluated with US ILI data from 1998-2018.
+geometry: margin=1in
+bibliography: sta_531_final.bib
+subparagraph: yes
+header-includes: |
+  \usepackage{titlesec}
+  \titlespacing{\section}{0pt}{12pt plus 2pt minus 1pt}{0pt plus 1pt minus 1pt}
+  \titlespacing{\subsection}{0pt}{12pt plus 2pt minus 1pt}{0pt plus 1pt minus 1pt}
+  \titlespacing{\subsubsection}{0pt}{12pt plus 2pt minus 1pt}{0pt plus 1pt minus 1pt}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+suppressMessages(library(tidyverse))
+library(cdcfluview)
+library(rlist)
+library(knitr)
+library(kableExtra)
+library(grid)
+suppressMessages(library(gridExtra))
+source("./BW_fcns.R")
+source("./viterbi.R")
+source("./flu_paper_model.R")
+
+```
+
+\section{Introduction}
+Every year influenza epidemics occur during winter months and result in a significant number of disease cases, deaths and public health expenses. According to the CDC, approximately 14-16\% of the US population shows symptoms of influenza-like ilnesses (ILI) which causes 79,000 deaths each year.  This has led public health officials to seek new ways of tracking potential outbreak situations via  automated, routine influenza surveillance methods. This has traditionally been done via temporal models that have to be constantly refitted, which has practical implications, to quickly detect emerging outbreaks. Thus, it becomes especially challenging when using large datasets. Therefore, there exists a need for conceptually simpler, yet powerful methods, that can be easily automated for disease surveillance and that provide fast and accurate early detection of epidemic onsets.
+Therefore, the main goal of this paper is to implement a two-state Hidden Markov Model (HMM) for the early detection of influenza epidemics. HMM provides a natural way to way to model temporal data (i.e. epidemic and non-epidemic periods) by using a probability distribution for each state, and the Markov property that greatly simplifies the time dependency of the data and hidden states (Le Strat, 1). This model was tested using the US CDC's [Influenza Surveillance network](https://www.cdc.gov/flu/weekly/overview.htm) yearly national ILI  incidence rates weighted by the states' population.
+
+\section{Previous Work}
+Over the last 20 years various HMMs have been proposed as temporal models for influenza and ILI surveillance methods. Le Strat and Carrat were the first to apply a two-state (epidemic and non-epidemic), homogenous HMM to ILI data with each state having a normally distributed cyclical pattern over a year (i.e. 52 week cycle) (1). Following this, others have proposed using similar HMMs but with different configurations, such as Rath \textit{et al} which use a Poisson rather than a Gaussian model to account for potential non-zero probabilities for negative rates (2). More recently, Martínez‐Beneito \textit{et al} implemented an HMM using Bayesian Gaussian and Poisson hierarchical models on a differenced time series data (3; Conesa, 4). In 2012, Nunes \textit{et al} further implemented a nowcasting model  via a non-homogenous HMM to help shorten the time to detect early onsets of epidemics and better model the time dependency of these dynamics using Bayesian heirarchical structure (5).
+
+\section{Methods}
+\subsection{Data}  
+National ILI weekly incidence rates data were obtained from the US CDC's Influenza Surveillance network via the `cdcfluview` package for the years 1997-present. For simplicity, years 1997 and 2019 were excluded from the analysis given these didn't contain complete sets for the specified year (i.e. $T \neq 52$). Subsequently, data was preprocessed following Martínez‐Beneito \textit{et al}'s approach by generating a differenced time-series out of ILI rates (3). This procedure maintains the differences between epidemic versus non-epidemic dynamics as seen in Figure 1 below, with the epidemic states having higher variability, which helps simplify the model specification.  
+
+```{r data_prep, echo = FALSE, fig.width=9, fig.height=2.5}
+
+ili_df = ilinet(region = "national")
+
+get_diffseries = function(incid_rate){
+  diff_series = rep(NA, length(incid_rate))
+  diff_series[1] = incid_rate[1]
+  diff_series[length(incid_rate)] = incid_rate[-(1:length(incid_rate) - 1)]
+  i = 2
+  while(i < length(incid_rate)){
+    diff_series[i] = incid_rate[i+1] - incid_rate[i]
+    i = i + 1
+  }
+  
+  return(diff_series)
+}
+
+flu_season = function(year){
+  base_yr = 2009
+  base_season = 49
+  base_season - (base_yr - year)
+}
+
+ili_df = ili_df %>% 
+  mutate(diff_weighted = get_diffseries(weighted_ili)) %>% 
+  mutate(season = flu_season(year))
+
+ili_dat = ili_df %>% 
+  select(year, week, diff_weighted, ilitotal,weighted_ili, season) %>% 
+  filter(!year %in% c(1997, 2019)) %>% 
+  filter(week != 53) %>% 
+  mutate(season = as.integer(season - min(season) +1))
+
+ili_df = ili_df %>% 
+  mutate(season = factor(flu_season(year)))
+
+
+p1 = ili_df %>% filter(year %in% c(2005:2008)) %>% 
+  ggplot(aes(x = week_start, y = weighted_ili, color = season)) + 
+  geom_line() +
+  theme_bw() +
+  labs(title = "A) Original Time Series (2005-2008)",
+       x = "Year", y = "ILI incidence rates") +
+  scale_color_discrete(guide=FALSE) +
+  theme(title = element_text(size = 11),
+        axis.title = element_text(size = 11))
+
+p2 = ili_df %>% filter(year %in% c(2005:2008))  %>% 
+  ggplot( aes(x = week_start, y = diff_weighted, color = season)) + 
+  geom_line() +
+  theme_bw() +
+  labs(title = "B) Differenced Time Series (2005-2008)", x = "Year") +
+  scale_color_discrete(guide=FALSE) + 
+  theme(axis.title.y =  element_blank(),
+        title = element_text(size = 11),
+        axis.title = element_text(size = 11))
+
+grid.arrange(p1,p2, ncol = 2, top = textGrob("Fig1. Original vs Differenced ILI Time Series",
+                                             gp=gpar(fontsize=14)))
+
+```
+  
+\subsection{HMM Model}
+The epidemic and non-epidemic trends in the differenced ILI data ($\mathbf{Y}$) were modeled via a finite, time-homogeneous two-state HMM based on Martínez‐Beneito \textit{et al}'s approach (3) as follows,
+\begin{align*}
+Y_{i,t} \mid Z_{i,t} = k, \psi \sim N(\mu_k, \sigma^2_{k,i}) \quad \quad i &= 1,..,N \quad \text{years with }\;  N =21\\[1ex]
+t &= 1,..,T \quad \text{weeks with }\; T=52\\[1ex]
+k &= 0,K \quad   \text{states with } \; K = 1
+\end{align*}
+$$Z_{i,t} \sim Cat (a_{0,k}, a_{1,k}) \quad \text{transition probabilities} \; a_{0,k},a_{1,k}$$
+where $Z_{i,t}$ are the hidden components for epidemic ($k=1$) and non-epidemic ($k = 0$) states, $\psi$ are model parameters  based on $\mu_k$, and $a_{j,k}$ are the transition probabilities between the epidemic and non-epidemic states. As an attempt to account for the epidemic dynamics having a larger variational structure than non-epidemic ones, $\mu_k$ was set to follow an AR(1) process for epidemic states such that
+$$\mu_k=\begin{cases} 
+      \rho\; Y_{i,t-1} & k = 1, \; t>1 \\
+      0 & k =0, \; t\geq 1; \; k=1, \; t =1
+   \end{cases}$$
+
+where $\rho$ is the auto-regressive parameter in $\psi$. Similarly, $\sigma^2_{k,i}$ was set such that the variance for the epidemic state was larger than the non-epidemic one with each year being different $\sigma^2_{1,i} > \sigma^2_{0,i}$
+Thus, the model is defined by the following complete data log-likelihood,
+$$\ell(y,z; \psi) =  \sum_{i=1}^N \bigg[ log \; f(z_{1,i}) + \sum_{t =1}^{T-1} log \; p(z_{t+1, i} \mid z_{t,i}) + \sum_{t=1}^T log \; q(y_{t,i} \mid z_{t,i}, \psi) \bigg]$$
+where $f(\cdot)$ specifies the initial state at $t=1$, while $p(\cdot \mid \cdot)$ and $q(\cdot \mid \cdot)$ determine the transition and  emission probabilities, respectively.
+
+However, since the model parameters are unknown it is necessary to learn these from the data. This was achieved via the \textit{Baum-Welch} algorithm, which leverages a type of Expectation-Maximization (EM) procedure for HMMs, on the following expected complete data log-likelihood expression (Bishop, 6)
+\begin{align*}
+Q(\psi, \psi^{(p+1)}) &= \sum_{i=1}^N \bigg[ \sum_{k=0}^K E[Z_{1,i}^k] \; log \; \pi_k+ \sum_{t =1}^{T-1} \sum_{j,k=0}^K E[Z_{t,i}^j \; Z_{t+1,i}^k] log \;a_{jk} +  \sum_{t=1}^T \sum_{k=0}^K E[Z_{t,i}^k] log \; N(\mu_k, \sigma_{k,i}^2)] \bigg]\\[1ex]
+&= \sum_{i=1}^N \bigg[\sum_{k=0}^K \gamma_{k,i}(1) \; log \pi_k + \sum_{t =1}^{T-1} \sum_{k=0}^K  \xi_{jk,i}(t) log \; a_{jk} + \sum_{t=1}^T \sum_{k=0}^K \gamma_{k,i}(t)\; log \; N(\mu_k, \sigma_{k,i}^2) \bigg]
+\end{align*}
+where $k$ is an indicator for $E[Z_{t,i}^k]$ being part of state $k^{th}$ and 
+$$\gamma_{k,i}(t) = E[Z_{t,i}^k] = p(Z_{t,i}^k = 1 \mid Y_{1:T, i}) \quad and \quad  \xi_{jk,i}(t) =E[Z_{t,i}^j \; Z_{t+1,i}^k] = p(Z_{t,i}^j \; Z_{t+1, i}^k \mid Y_{1:T,i})$$
+
+\subsection{HMM Training via Baum-Welch}
+\textbf{\textit{E-Step - Normalized Forward-Backward algorithm}}  
+The expectations were computed via a normalized version of the forward-backward algorithm given numerical underflow is a common problem of the regular forward-backward procedure (Bishiop, 6; Zhai, 7). In summary, it normalizes the values at each step of the forward-backward procedure such that the $\sum_{k} \hat{\alpha}_{i,k}(t) = 1$ constraint is met in the forward step only. Thus, we obtain the following expressions for the E-Step
+\begin{align*}
+\gamma_{k,i}(t) &= \frac{\hat{\alpha}_{k,i}(t) \hat{\beta}_{k,i}(t)}{\sum_{l=0}^K \hat{\alpha}_{l,i}(t) \hat{\beta}_{l,i}(t)}\\[2ex]
+ \xi_{jk,i}(t) &=  \frac{\gamma_{j,i}(t) \;a_{jk} \;q(y_{t+1,i} \mid z_{t+1, i} = k)\; \eta_{t+1,i} \;\hat{\beta}_{k,i}(t+1) }{\hat{\beta}_{j,i}(t)}
+\end{align*}
+where $\hat{\alpha}_{k,i}(t)$ and $\hat{\beta}_{k,i}(t)$ are the normalized $\alpha, \beta$ quantities, and $\eta_{t,i} = \frac{1}{\sum_{k=0}^K \alpha_{k,i}(t)}$ is the normalizing constant computed at each forward step (\textbf{Note:} this constant cancels out when calculating $\gamma_{k,i}(t)$)
+
+\textbf{\textit{M-Step}}  
+Subsequently, the updates were determined by finding the maximum likelihood estimates (MLEs) for $\rho$, $\pi_k$ (initial states), $a_{jk}$, $\sigma^2_{0,i}$, and $\sigma^2_{1,i}$ via the arg max of $Q(\psi, \psi^{(p+1)})$ such that
+$$\pi_k^{(p+1)} = \frac{\sum_{i=1}^N \gamma_{k,i}(1)}{\sum_{i=0}^N \sum_{l=0}^{K} \gamma_{l,i}(1)} \qquad \qquad a_{jk}^{(p + 1)} = \frac{\sum_{i=1}^N \sum_{t=1}^{T-1} \xi_{jk,i}(t)}{\sum_{i =1}^N \sum_{t=1}^{T-1} \sum_{l = 0}^K \xi_{jl,i}(t)}$$
+$$(\sigma_{0,i}^2)^{(p+1)} = \frac{ \sum_{t =1}^T \gamma_{0,i}(t) y_{i,t}^2}{\sum_{t =1}^T \gamma_{0,i}(t)} \qquad \qquad \rho^{(p+1)} = \frac{\sum_{i=1}^N \sum_{t=2}^T  \gamma_{1,i}(t) \; y_{i,t} \; y_{i, t-1}}{\sum_{i=1}^N \sum_{t=2}^T y_{i, t-1}^2} $$
+$$(\sigma_{1,i}^2)^{(p+1)} = \frac{ \sum_{t=2}^T \gamma_{1,i}(t)(y_{i,t} - \rho^{(p+1)} y_{i,t-1})^2}{\sum_{t =2}^T \gamma_{1,i}(t)} \qquad \bigg( \text{for} \; t =1 ;\quad (\sigma_{1,i}^2)^{(p+1)}= \frac{  \gamma_{1,i}(1) y_{i,1}^2}{\gamma_{1,i}(1)} \bigg)$$
+
+\subsection{Parameter Inference}
+Parameters were estimated via the Baum-Welch (BW) procedure noted above by initializing the parameters and iterating the E- and M-steps until convergence. However, given the EM algorithm optimizes for the local maxima/minima the parameters were initialized at different starting values to assess convergence (Bishop, 6). This process was repeated 7 times with two different sets of initial state probabilities each time
+$$\text{Fixed Initial States}: \pi_0 = 0; \; \pi_1 = 1
+\qquad \qquad \text{Random Initial States}:\pi_0 \sim Unif[0,1]; \; \pi_1 \sim Unif[0,1]$$
+
+and rest of the parameters started at different random points following Martínez‐Beneito \textit{et al}'s approach (1) 
+$$a_{0,0} \sim Beta(0.5, 0,5) \quad \text{thus } a_{0,1} = 1 - a_{0,0}$$
+$$a_{1,1} \sim Beta(0.5, 0,5) \quad \text{thus } a_{1,0} = 1 - a_{1,1}$$
+$$\rho \sim Unif(-1,1)$$
+$$\sigma_{0,i} \sim Unif[\theta_{low}, \theta_{mid1}] \qquad \qquad \sigma_{1,i} \sim Unif[\theta_{mid2}, \theta_{high}]$$
+$$\theta_{low} \sim Unif[a,b] \qquad \; \qquad \theta_{mid1} \sim Unif[\theta_{low}, b]$$
+$$\theta_{mid2} \sim Unif[\theta_{mid1}, b] \qquad \qquad \theta_{high} \sim Unif[\theta_{mid2}, b]$$
+where $a = 1$ so that $\sigma_{0,i}$ wouldn't converge to 0, and $b = 5$ given the largest difference observed in the data was $4.5$.  
+
+\subsection{Decoding - Viterbi Algorithm}
+The averages of the learned parameters from the trained model were used to find the most likely path for each year $i$ using the Viterbi algorithm, which implements recursive steps  similar to the forward algorithm, on the same data (Bishop, 6). Here, the algorithm looked at the max over all previous steps ($v_{k,i}$) and stored the path indexes in a back-trace table ($b_{k,i}$) to easily identify the most probably path. The recursive steps were constructed via the following
+$$v_{k,i}(t) = max_{k=1}^N \; v_{j,i}(t-1)\;a_{jk}\;q(Y_{t,i} \mid Z_{t,i} =k) \quad 1 \leq k \leq N,1 < t \leq T$$
+$$b_{k,i}(t) = argmax_{k=1}^N \; v_{j,i}(t-1)\;a_{jk}\;q(Y_{t,i} \mid Z_{t,i} =k) \quad 1 \leq k \leq N,1 < t \leq T$$
+and the most most probable path is found via $P = max_{k=1}^N v_{k,i}(T)$. 
+
+\subsection{Parameter Inference and Decoding Comparisons}
+Consequently, comparative results for the parameter inference and decoding were generated via the JAGS model provided in Martínez‐Beneito \textit{et al} and the `depmixS4` R-package (3). The JAGS model was used to compare inference estimates and implemented as outlined in the paper with a slight modification - setting the standard deviation of hyperparameters to $a =1$ and $b= 5$. Additionally, a Gelman-Rubin diagnostic was used to assess the convergence of the chains for each parameter (Bishop, 6). The `depmixS4` package was used to compare the decoding results. It was used to fit a HMM on the the same data with default settings (i.e. EM algorithm) and then to decode the most probable states based on depmixS4 trained model. 
+
+
+\section{Results}
+```{r full_data_train, echo = FALSE, cache = TRUE}
+
+# Baum Welch with initial state as epidemic
+out_bw = baum_welch(ili_dat, var_lbound = 1, var_ubound = 5, 
+                    err_cutoff = 1e-8, n_rand_start = 7, rinit_states = FALSE)
+
+# Baum Welch with random initial states
+out_bw2 = baum_welch(ili_dat, var_lbound = 1, var_ubound = 5, 
+                    err_cutoff =  1e-8, n_rand_start =  7)
+
+```
+
+Table 1 below shows the parameter inference results $\pi_0$, $\pi_1$, $\rho$, $a_{k,0}$, and $a_{k,1}$ for each of the 7 Baum-Welch iterations under the two states initial state conditions outlined above. Here we can see that on average the convergence of all parameters with a tolerance level of $10^{-8}$ is lower for the random initial states compare to the fixed ones ($71$ <$93$), with random states converging to higher probability of starting in a non-epidemic state $\pi_0$. Overall, the transition probabilites were similar except $a_{1,0}$ and $a_{1,1}$ with $a_{1,0}$ being higher and $a_{1,1}$ being lower the fixed initial state case. Similarly, $rho$ was higher for the fixed initialized states. Similar tables were computed for $\sigma_{0,i}$ and $\sigma_{1,i}$  (tables not shown, see Suppl. File 1) with averages from these tables shown in Table 3. 
+
+```{r BW_out_tables, echo = FALSE, results='asis'}
+#########################
+###### Baum Welch #######
+#########################
+# Sourced from BW_fcns.R script
+extract_bwlist = function(bw_out){
+  em_cnts = list.select(bw_out, iter) %>% flatten() %>%
+                       list.rbind()
+  
+  em_st_states = list.select(bw_out, st_states) %>% flatten() %>%
+                       list.rbind()
+  
+  em_rho = list.select(bw_out, rho) %>% flatten() %>%
+                       list.rbind()
+  
+  em_trans_mat = list.select(bw_out, trans_mat) %>% flatten() %>%
+                       list.rbind()
+  
+  df = data_frame(iter = c(em_cnts), 
+             pi_0 = em_st_states[,1],
+             pi_1 = em_st_states[,2],
+             P0.0 = em_trans_mat[,1],
+             P0.1 = em_trans_mat[,2],
+             P1.0 = em_trans_mat[,3],
+             P1.1 = em_trans_mat[,4],
+             rho = em_rho[,1]) %>% 
+       rownames_to_column("trial") %>% 
+       mutate(trial = as.integer(trial))
+  
+  df_sigma0 = list.select(bw_out, std_dev0) %>% flatten() %>%
+                       list.rbind() %>% as_data_frame() %>%
+                       rownames_to_column("trial") %>% 
+                       mutate(trial = as.integer(trial))
+  
+  df_sigma1 = list.select(bw_out, std_dev1) %>% flatten() %>%
+                       list.rbind() %>% as_data_frame() %>%
+                       rownames_to_column("trial") %>% 
+                       mutate(trial = as.integer(trial))
+   
+  return(list(df, df_sigma0, df_sigma1))
+}
+
+
+dfs_bw1 = extract_bwlist(out_bw) ## Initial state as epidemic
+dfs_bw2 = extract_bwlist(out_bw2) ## Initial state as random
+
+# All params table except std devs for both outputs + avg per column
+df_long = bind_cols(dfs_bw1[[1]], dfs_bw2[[1]][,-1])
+avg_long = df_long %>% summarise_all(mean)
+avg_long$trial = "Avg"
+df_long = df_long %>% 
+  mutate(trial = as.character(trial)) %>% 
+  bind_rows(., avg_long) %>% 
+  mutate(iter = as.integer(iter),
+         iter1 = as.integer(iter1))
+  
+#### Table of BW params w/o std devs
+kable(df_long, "latex", longtable = T, booktabs = T, 
+      caption = "HMM Parameter Estimates via Baum-Welch", digits = 3,
+      col.names = c("T", rep(c("iter", "pi_0", "pi_1", "P0.0", "P1.0",
+                    "P0.1", "P1.1", "rho"), 2)),
+      linesep ="") %>%
+  add_header_above(c(" ", "Fixed Init Epidemic State" = 8, "Random Init States" = 8)) %>% 
+  column_spec(1:ncol(df_long), width = "0.69cm") %>% 
+  column_spec(c(3:4), width = "0.5cm") %>%
+  column_spec(c(2,10), width = "0.3cm") %>% 
+  column_spec(1, width = "0.43cm") %>% 
+  row_spec(8, bold = TRUE) %>% 
+  kable_styling(position = "left", 
+                latex_options = c("striped", "hold_position"),
+                font_size = 9.5)
+
+
+#### BW Sigma 0 estimates
+df_long_s0 = cbind(t(dfs_bw1[[2]]), rowMeans(t(dfs_bw1[[2]])),
+                   t(dfs_bw2[[2]]), rowMeans(t(dfs_bw2[[2]])))[-1,] %>% 
+  as.data.frame() %>% 
+  rownames_to_column("Year") %>% 
+  mutate(Year = seq(1,21,1))
+colnames(df_long_s0)[2:9] = colnames(df_long_s0)[10:17] = c(sapply(1:7, function(x) paste0("T",x))
+                                                            , "Avg")
+
+df_s0_avg = df_long_s0[,c(9,17)]
+rownames(df_s0_avg) = seq(1,21,1) 
+
+
+####  BW Sigma 1 estimates
+df_long_s1 = cbind(t(dfs_bw1[[3]]), rowMeans(t(dfs_bw1[[3]])),
+                   t(dfs_bw2[[3]]), rowMeans(t(dfs_bw2[[3]])))[-1,] %>% 
+  as.data.frame() %>% 
+  rownames_to_column("Year") %>% 
+  mutate(Year = seq(1,21,1))
+colnames(df_long_s1)[2:9] = colnames(df_long_s1)[10:17] = c(sapply(1:7, function(x) paste0("T",x))
+                                                            , "Avg")
+
+df_s1_avg = df_long_s1[,c(9,17)]
+rownames(df_s1_avg) = seq(1,21,1) 
+
+```
+
+```{r depmix, echo = FALSE, message= FALSE, warning=FALSE, results="hide"}
+#####################
+###### DepMix #######
+#####################
+
+dep_fm = list()
+post_probs = list()
+for (i in 1:5){
+  set.seed(i)
+  p0 = rbeta(1, 0.5, 0.5)
+  p1 = rbeta(1, 0.5, 0.5)
+  mod = depmixS4::depmix(response = diff_weighted ~ 1, 
+                        data = ili_dat, 
+                        instart = c(0.5, 0.5),
+                        trstart = c(p0, 1- p1, 1-p0, p1),
+                        nstates = 2,  
+                        family = gaussian(), ntimes = rep(52,21))
+  dep_fm[[i]] = depmixS4::fit(mod, verbose = FALSE)
+  post_probs[[i]] = depmixS4::posterior(dep_fm[[i]])
+}
+```
+
+```{r jags, echo = FALSE, cache=TRUE, message=FALSE}
+#########################
+###### MCMC Paper #######
+#########################
+# Sourced: flu_paper_model.R
+
+
+out_mcmc = paper_model(ili_dat, var_lbound = 1, var_ubound = 5, burn_in = 1000, nthin = 45,
+                       mc_iter = 30000, n_chains = 3 )
+
+```
+
+Given these two initial conditions provided similar, yet slightly different results, Martínez‐Beneito \textit{et al}'s JAGS model was run to generate the parameter estimates via a Gibbs sampler (1). Tables 2 -4 below show the results from the BW and JAGS parameter inferences. From the tables we see a clear difference between the methods, with JAGS inferences having a significantly higher transition probability from epidemic to non-epidemic states. Thus, a Gelman-Rubin diagnostic was run for each parameter to assess MCMC convergence (results not shown). This led to potential scale reduction factors ranging from $1.1-2$ which signify a lack of convergence of the chains. No further analysis was done on this at the moment. 
+
+```{r compare_tables, echo = FALSE, results='asis'}
+
+##  Helper function to extract jags output
+extract_mcmc = function(mcmc_out){
+  # Get non std dev parameter means
+  df = data_frame(P0.0 = mean(mcmc_out$P.mat[1,1,,]),
+                  P0.1 = mean(mcmc_out$P.mat[1,2,,]),
+                  P1.0 = mean(mcmc_out$P.mat[2,1,,]),
+                  P1.1 = mean(mcmc_out$P.mat[2,2,,]),
+                  rho = mean(mcmc_out$ro)
+                  )
+  
+  stdev0 = stdev1 = mc_class = c() # Get sigma0, sigma1 and class outputs
+  for(i in 1:dim(out_mcmc$lambda)[2]){
+    stdev0 = c(stdev0, mean(mcmc_out$lambda[1,i,,]))
+    stdev1 = c(stdev1, mean(mcmc_out$lambda[2,i,,]))
+    mc_class = rbind(mc_class, round(rowMeans(out_mcmc$comp[,i,,1])))
+  }
+  
+  ## Gelman Rubin Diagnostic for 3 chains
+  gd_rho = gelman.diag(mcmc.list(mcmc(mcmc_out$ro[,,1]), 
+                                 mcmc(mcmc_out$ro[,,2]), 
+                                 mcmc(mcmc_out$ro[,,3])))$psrf[1]
+  
+  gd_pmat = c()
+  pairs = list(c(1,1), c(1,2), c(2,1), c(2,2))
+  for(p in pairs){
+    i = p[1]
+    j = p[2]
+    gd_pmat = c(gd_pmat, gelman.diag(mcmc.list(mcmc(out_mcmc$P.mat[i,j,,1]),
+                                               mcmc(out_mcmc$P.mat[i,j,,2]), 
+                                               mcmc(out_mcmc$P.mat[i,j,,3])))$psrf[1]
+                )
+  }
+  return(list(df, stdev0, stdev1, mc_class, gd_rho, gd_pmat))
+}
+
+# Get MCMC parameter estimates and GR diagnostic values
+mcmc_dat = extract_mcmc(out_mcmc)
+
+tmp_df = df_long %>% rename(P0.0 = "P0.01", P0.1 = "P0.11", P1.0 = "P1.01",
+                            P1.1 = "P1.11", rho = "rho1")
+comp_df = rbind(tmp_df[8,5:9], tmp_df[8,13:17],mcmc_dat[[1]]) %>% t()
+colnames(comp_df) = c("BW Fixed","BW Rand", "MCMC")
+
+## Parameter tables for BW + MCMC
+kable(t(comp_df), "latex", digits = 3, caption = "Avg HMM Parameter Estimates", booktabs = T) %>% 
+  kable_styling(latex_options = c("striped", "hold_position"),
+                font_size = 9.5)
+
+
+### Tables sigma0 and sigma1 for BW + MCMC
+df_s0_avg = df_s0_avg %>% 
+  mutate(mcmc = mcmc_dat[[2]])
+
+df_s1_avg = df_s1_avg %>% 
+  mutate(mcmc = mcmc_dat[[3]])
+
+t1 = kable(df_s0_avg, "latex", booktabs = T,
+      digits = 3, col.names = c("Fixed Init", "Random Init", "MCMC"),
+      linesep = "", align = "c") %>% 
+  kable_styling(latex_options = c("striped"),
+                font_size = 9)
+
+t2 =kable( df_s1_avg, "latex", booktabs = T,
+      digits = 3, col.names = c("Fixed Init", "Random Init", "MCMC"),
+      linesep = "", align = "c") %>% 
+  kable_styling(latex_options = c("striped"),
+                font_size = 9)
+
+
+cat(c("\\begin{table}[!htb]
+    \\begin{minipage}{.5\\linewidth}
+      \\caption{Avg HMM Sigma 0 Param Estimates}
+      \\centering",
+        t1,
+    "\\end{minipage}%
+    \\begin{minipage}{.5\\linewidth}
+      \\centering
+        \\caption{Avg HMM Sigma 1 Param Estimates}",
+        t2,
+    "\\end{minipage}
+\\end{table}"
+))
+
+
+```
+
+The `depmixS4` package was used instead to compare how effective the BW method delineated above was at classifying the epidemic vs non-epidemic weeks given JAGS couldn't verify the parameter estimates. However, the BW fixed initial state average parameters were used for decoding given it improved the model's sensitivity. This makes sense given overall the year starts at an epidemic state with lots of ILI cases due to weather.  Figure 2 below shows the weekly classification results of the BW and `depmixS4` methods for all the years in the dataset. Overall, the BW method correctly classified the same amount of epidemic weeks as `depmixS4` (blue), but tended to miss epidemic weeks in the 2000s and late 1990s (green). However, the BW method was more sensitive at classifying the tails of the epidemic seasons in some cases (red).  
+
+```{r decode, echo=FALSE, warning=FALSE, fig.width=9, fig.height=2.8}
+
+
+df_viterb = df_long[8,3:9]
+out_viterb = viterbi_decoding(ili_dat, start_states = unlist(df_viterb[1:2]),
+                              trans_mat = unlist(df_viterb[3:6]),
+                              rho = unlist(df_viterb[7]),
+                              std_dev0 = c(df_s0_avg[,1]), 
+                              std_dev1 = c(df_s1_avg[,1]))
+
+
+class = list.select(out_viterb, states) %>% flatten()%>% list.cbind() %>% 
+  as_data_frame()
+colnames(class) = unique(ili_dat$year)
+
+class = class  %>% 
+  mutate(week = unique(ili_dat$week)) %>% 
+  gather(key, val, -week)
+
+
+ili_dat2 = bind_cols(ili_dat, class[,3], dpmix = post_probs[[1]]$state -1) %>% 
+  mutate(mutual_assign = ifelse(val ==1 & dpmix == 1, weighted_ili, NA_integer_)) %>% 
+  mutate(depmix_assign = ifelse(dpmix ==1 & val == 0, weighted_ili, NA_integer_)) %>% 
+  mutate(bw_assign = ifelse(val ==1 & dpmix == 0, weighted_ili, NA_integer_)) %>% 
+  gather(key, val, mutual_assign, depmix_assign, bw_assign)
+
+ili10 = ili_dat2 %>% filter(season %in% c(1:11))
+ili20 = ili_dat2 %>% filter(!season %in% c(1:11))
+
+ggplot(ili10) + geom_line(aes(x = week, y = weighted_ili)) +
+      geom_point(aes(x = week, y = val, color = key)) +
+      theme_bw() +
+      labs(y = "ILI Incidence Rate, weighted / state pop") +
+      scale_color_discrete(guide=FALSE) +
+      labs(title = "Fig 2. Classification Comparison of BW vs depmixS4") +
+      facet_grid(~year, scales = "free_y") +
+      theme(axis.text.y = element_text(size=8, angle=90),
+            axis.text.x = element_blank(),
+            axis.title.x = element_blank(),
+            panel.grid.minor.x  = element_blank())
+```
+
+```{r plots2, echo=FALSE, warning=FALSE, fig.width=9, fig.height=3.8}
+ggplot(ili20) + geom_line(aes(x = week, y = weighted_ili)) +
+      geom_point(aes(x = week, y = val, color = key)) +
+      theme_bw() +
+      labs(y = "ILI Incidence Rate, weighted / state pop", x = "Weeks in year") +
+      scale_color_discrete(name = "Legend", labels = c("BW only", "Depmix only", "Both")) +
+      facet_grid(~year, scales = "free_y") +
+      theme(axis.text.y = element_text(size=8, angle=90),
+            axis.text.x = element_blank(),
+            panel.grid.minor.x  = element_blank(),
+            legend.position = "bottom")
+
+
+```
+
+\section{Conclusions}
+The goal of this project was to build a disease surveillance model focused to Influenza that could detect early onset of epidemic states. The parameters in the model, based on Martínez‐Beneito \textit{et al}'s previous approach, were successfully trained using a different parameter inference approach (BW) to that of Martínez‐Beneito, which used a MCMC approach (3). When comparing these approaches the MCMC showed convergence problems and incorrect parameter estimations thus showing the limitations of their approach when applied to new data. Additionally, this approach takes a long time to generate the parameter inferences. In comparison, the EM-based approaches (BW and `depmixS4`) seemed to be successful at inferring the parameters and classifying the epidemic/non-epidemic dynamics with minor computational cost. Compared to `depmixS4`, the BW's AR(1) process specification seems to increases the classification sensitivity for the tails of the epidemics. Overall, these methods provided significantly faster inference results with the small caveat that the  BW method misses multiple epidemic weeks.  However, these approach does have its own limitations as it will find the local maxima/minima which highly depend on where parameters are initialized as shown above - specifically in the BW approach. Similarly, its effectiveness is dependent the correct derivations of the EM updates and subsequent implementation of said steps.  
+Further work in the parameter inference and modeling can be done. First, the BW implementation could be further improved the classification of epidemic dynamics similar to `depmixS4` via other optimization techniques such as Newton-Raphson or Monte Carlo EM (MCEM). Additionally, the model specification could be improved via a similar approach in Martínez‐Beneito \textit{et al}'s subsequent paper that uses a Poisson-based hierarchical approach.
+
+
+\begin{thebibliography}{999}
+
+\bibitem{strat99}Strat, Yann Le, and Fabrice Carrat. “Monitoring Epidemiologic Surveillance Data Using Hidden Markov Models.” Statistics in Medicine, vol. 18, no. 24, 1999, pp. 3463–3478., doi:10.1002/(sici)1097-0258(19991230)18:24<3463::aid-sim409>3.3.co;2-9.
+
+\bibitem{rath03}
+Rath, Toni M., et al. “Automated Detection of Influenza Epidemics with Hidden Markov Models.” Advances in Intelligent Data Analysis V Lecture Notes in Computer Science, 2003, pp. 521–532.
+
+\bibitem{mb08}
+Martínez-Beneito, Miguel A., et al. “Bayesian Markov Switching Models for the Early Detection of Influenza Epidemics.” Statistics in Medicine, vol. 27, no. 22, 2008, pp. 4455–4468., doi:10.1002/sim.3320.
+
+\bibitem{conesa11}
+Conesa, D, et al. “Bayesian Hierarchical Poisson Models with a Hidden Markov Structure for the Detection of Influenza Epidemic Outbreaks.” Statistical Methods in Medical Research, vol. 24, no. 2, 2011, pp. 206–223.,doi:10.1177/0962280211414853.
+
+\bibitem{nunes12}
+Nunes, Baltazar, et al. “Nowcasting Influenza Epidemics Using Non-Homogeneous Hidden Markov Models.” Statistics in Medicine, vol. 32, no. 15, 2012, pp. 2643–2660., doi:10.1002/sim.5670.
+
+\bibitem{bishop16}
+BISHOP, CHRISTOPHER M. PATTERN RECOGNITION AND MACHINE LEARNING. SPRINGER-VERLAG NEW YORK, 2016.
+
+\bibitem{zhai}
+Zhai, ChengXiang. A Brief Note on the Hidden Markov Models (HMMs). University of Illinois at Urbana-Champaign, 13 Mar. 2003, pdfs.semanticscholar.org/54dc/c2a758e7fa34b8c2ef19826f39f16c4d1731.pdf.
+
+
+\end{thebibliography}
+
+
+
+
+
+```{r, echo = FALSE}
+kable(df_long_s0, "latex", longtable = T, booktabs = T, 
+      caption = "Sigma0 Parameter Estimate via Baum-Welch", digits = 3,
+      linesep ="") %>%
+  add_header_above(c(" ", "Fixed Init Epidemic State" = 8, "Random Init States" = 8)) %>% 
+  column_spec(1:ncol(df_long_s0), width = "0.65cm") %>% 
+  column_spec(1, width = "0.2cm") %>% 
+  column_spec(c(9,17), bold = TRUE) %>% 
+  kable_styling(position = "left", 
+                latex_options = c("striped"),
+                font_size = 7)
+
+
+kable(df_long_s1, "latex", longtable = T, booktabs = T, 
+      caption = "Sigma1 Parameter Estimate via Baum-Welch", digits = 3,
+      linesep ="") %>%
+  add_header_above(c(" ", "Fixed Init Epidemic State" = 8, "Random Init States" = 8)) %>% 
+  column_spec(1:ncol(df_long_s1), width = "0.65cm") %>% 
+  column_spec(1, width = "0.2cm") %>% 
+  column_spec(c(9,17), bold = TRUE) %>% 
+  kable_styling(position = "left", 
+                latex_options = c("striped"),
+                font_size = 7)
+
+```
+
+
+
+
+
+
