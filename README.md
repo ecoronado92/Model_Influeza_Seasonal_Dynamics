@@ -7,6 +7,7 @@ Early detection of the influenza outbreaks is one of the biggest challenges of o
 algorithm. The model was evaluated with US ILI data from 1998-2018.
 
 ### Files
+
 - `*.html` final document
 - `*.Rmd` generates final document
 - `BW_fcns.R` is a script containing the Baum-Welch functions to train the model
