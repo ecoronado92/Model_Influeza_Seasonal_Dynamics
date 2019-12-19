@@ -1,11 +1,12 @@
 ---
-title: "STA 531 Final Paper"
+title: "Modeling Influenza's Seasonal Dynamics"
 author: "Eduardo Coronado"
 date: "April 26th, 2019"
 output: 
-  html_document
+  rmdformats::readthedown:
+    theme: sandstone
+    highlight: tango
 fontsize: 11pt
-abstract:  Early detection of the influenza outbreaks is one of the biggest challenges of outbreak surveillance systems. In this paper, a finite, homogeneous two-state Hidden Markov Model (HMM) was developed to determine the epidemic and non-epidemic dynamics influenza-like illnesses (ILI) in a differenced time series. These dynamics were further modeled via a first-order auto-regressive process based on the state, and parameters estimated via the Baum-Welch algorithm. The model was evaluated with US ILI data from 1998-2018. For more info visit - [www.github.com/ecoronado92](https://github.com/ecoronado92/Model_Influeza_Seasonal_Dynamics)
 geometry: margin=1in
 bibliography: citations.bib
 subparagraph: yes
@@ -17,7 +18,7 @@ header-includes: |
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
 
 suppressMessages(library(tidyverse))
 library(cdcfluview)
@@ -31,6 +32,10 @@ source("./viterbi.R")
 source("./flu_paper_model.R")
 
 ```
+## Abstract 
+Early detection of the influenza outbreaks is one of the biggest challenges of outbreak surveillance systems. In this paper, a finite, homogeneous two-state Hidden Markov Model (HMM) was developed to determine the epidemic and non-epidemic dynamics influenza-like illnesses (ILI) in a differenced time series. These dynamics were further modeled via a first-order auto-regressive process based on the state, and parameters estimated via the Baum-Welch algorithm. The model was evaluated with US ILI data from 1998-2018. 
+<br> <br>
+For more info visit - [www.github.com/ecoronado92](https://github.com/ecoronado92/Model_Influeza_Seasonal_Dynamics)
 
 ## Introduction
 Every year influenza epidemics occur during winter months and result in a significant number of disease cases, deaths and public health expenses. According to the CDC, approximately 14-16\% of the US population shows symptoms of influenza-like ilnesses (ILI) which causes 79,000 deaths each year.  This has led public health officials to seek new ways of tracking potential outbreak situations via  automated, routine influenza surveillance methods. This has traditionally been done via temporal models that have to be constantly refitted, which has practical implications, to quickly detect emerging outbreaks. Thus, it becomes especially challenging when using large datasets. Therefore, there exists a need for conceptually simpler, yet powerful methods, that can be easily automated for disease surveillance and that provide fast and accurate early detection of epidemic onsets.
